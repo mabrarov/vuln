@@ -5,10 +5,12 @@
 package sarif
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/vuln/internal"
 	"golang.org/x/vuln/internal/govulncheck"
 )
 
@@ -24,9 +26,41 @@ func scanLevel(f *govulncheck.Finding) string {
 }
 
 func newTestHandler() *handler {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 	h.cfg = &govulncheck.Config{}
 	return h
+}
+
+func TestLoadGomodValid(t *testing.T) {
+	moduleLines, err := LoadGomod(filepath.FromSlash("testdata/modules/valid/subdir"))
+	if err != nil {
+		t.Fatalf("error loading go.mod: %v", err)
+	}
+
+	want := map[string]int{
+		internal.GoStdModulePath:           3,
+		"github.com/tidwall/gjson@v1.6.5":  8,
+		"golang.org/x/text@v0.3.0":         11,
+		"github.com/tidwall/match@v1.1.0":  15,
+		"github.com/tidwall/pretty@v1.2.0": 16,
+	}
+	got := make(map[string]int)
+	for module, line := range moduleLines {
+		got[module] = line.Start.Line
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want;got+): %s", diff)
+	}
+}
+
+func TestLoadGomodInvalid(t *testing.T) {
+	moduleLines, err := LoadGomod(filepath.FromSlash("testdata/modules/invalid"))
+	if err == nil {
+		t.Error("expected error in case of invalid go.mod")
+	}
+	if moduleLines != nil {
+		t.Errorf("expected nil in case of error, got: %+v", moduleLines)
+	}
 }
 
 func TestHandlerSymbol(t *testing.T) {
