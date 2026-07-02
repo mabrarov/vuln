@@ -11,6 +11,7 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/vuln/internal/client"
 	"golang.org/x/vuln/internal/derrors"
+	"golang.org/x/vuln/internal/gomod"
 	"golang.org/x/vuln/internal/govulncheck"
 	"golang.org/x/vuln/internal/vulncheck"
 )
@@ -26,7 +27,7 @@ func runSource(ctx context.Context, handler govulncheck.Handler, cfg *config, cl
 	if cfg.ScanLevel.WantPackages() && len(cfg.patterns) == 0 {
 		return errNoPatterns
 	}
-	if !gomodExists(dir) {
+	if _, gomodExists := gomod.Path(dir); !gomodExists {
 		return errNoGoMod
 	}
 	graph := vulncheck.NewPackageGraph(cfg.GoVersion)

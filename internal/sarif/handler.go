@@ -8,10 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/vuln/internal"
+	"golang.org/x/vuln/internal/gomod"
 	"golang.org/x/vuln/internal/govulncheck"
 	"golang.org/x/vuln/internal/osv"
 	"golang.org/x/vuln/internal/traces"
@@ -19,9 +23,10 @@ import (
 
 // handler for sarif output.
 type handler struct {
-	w    io.Writer
-	cfg  *govulncheck.Config
-	osvs map[string]*osv.Entry
+	w           io.Writer
+	moduleLines map[string]*modfile.Line
+	cfg         *govulncheck.Config
+	osvs        map[string]*osv.Entry
 	// findings contains same-level findings for an
 	// OSV at the most precise level of granularity
 	// available. This means, for instance, that if
@@ -30,11 +35,19 @@ type handler struct {
 	findings map[string][]*govulncheck.Finding
 }
 
-func NewHandler(w io.Writer) *handler {
+func LoadGomod(dir string) (map[string]*modfile.Line, error) {
+	if gomodPath, gomodExists := gomod.Path(dir); gomodExists {
+		return gomodModuleLines(gomodPath)
+	}
+	return nil, nil
+}
+
+func NewHandler(w io.Writer, moduleLines map[string]*modfile.Line) *handler {
 	return &handler{
-		w:        w,
-		osvs:     make(map[string]*osv.Entry),
-		findings: make(map[string][]*govulncheck.Finding),
+		w:           w,
+		moduleLines: moduleLines,
+		osvs:        make(map[string]*osv.Entry),
+		findings:    make(map[string][]*govulncheck.Finding),
 	}
 }
 
@@ -180,15 +193,23 @@ func results(h *handler) []Result {
 		if h.cfg.ScanMode != govulncheck.ScanModeBinary {
 			// Attach result to the go.mod file for source analysis.
 			// But there is no such place for binaries.
-			locs = []Location{{PhysicalLocation: PhysicalLocation{
-				ArtifactLocation: ArtifactLocation{
-					URI:       "go.mod",
-					URIBaseID: SrcRootID,
-				},
-				Region: Region{StartLine: 1}, // for now, point to the first line
-			},
-				Message: Description{Text: fmt.Sprintf("Findings for vulnerability %s", osv)}, // not having a message here results in an invalid sarif
-			}}
+			lines := physicalLocationLines(h, fs)
+			locs = make([]Location, 0, len(lines))
+			artifactLocation := ArtifactLocation{
+				URI:       "go.mod",
+				URIBaseID: SrcRootID,
+			}
+			message := Description{Text: fmt.Sprintf("Findings for vulnerability %s", osv)}
+			for _, line := range lines {
+				location := Location{
+					PhysicalLocation: PhysicalLocation{
+						ArtifactLocation: artifactLocation,
+						Region:           Region{StartLine: line},
+					},
+					Message: message, // not having a message here results in an invalid sarif
+				}
+				locs = append(locs, location)
+			}
 		}
 
 		res := Result{
@@ -245,9 +266,10 @@ func resultMessage(findings []*govulncheck.Finding, cfg *govulncheck.Config) str
 }
 
 const (
-	errorLevel         = "error"
-	warningLevel       = "warning"
-	informationalLevel = "note"
+	errorLevel             = "error"
+	warningLevel           = "warning"
+	informationalLevel     = "note"
+	moduleVersionSeparator = "@"
 )
 
 func level(f *govulncheck.Finding, cfg *govulncheck.Config) string {
@@ -301,7 +323,7 @@ func stack(h *handler, f *govulncheck.Finding) Stack {
 		}
 
 		sf := Frame{
-			Module:   frame.Module + "@" + frame.Version,
+			Module:   frame.Module + moduleVersionSeparator + frame.Version,
 			Location: Location{Message: Description{Text: symbol(frame)}}, // show the (full) symbol name
 		}
 		file, base := fileURIInfo(pos.Filename, top.Module, frame.Module, frame.Version)
@@ -358,6 +380,41 @@ func codeFlows(h *handler, fs []*govulncheck.Finding) []CodeFlow {
 	return codeFlows
 }
 
+func physicalLocationLines(h *handler, fs []*govulncheck.Finding) []int {
+	if len(h.moduleLines) == 0 {
+		// Fallback to default line.
+		return []int{1}
+	}
+
+	lines := make(map[int]struct{}, len(fs))
+
+	for _, finding := range fs {
+		if len(finding.Trace) != 0 {
+			rootTrace := finding.Trace[0]
+			module := rootTrace.Module
+			if module != internal.GoStdModulePath {
+				module += moduleVersionSeparator + rootTrace.Version
+			}
+			if line, found := h.moduleLines[module]; found {
+				lines[line.Start.Line] = struct{}{}
+			}
+		}
+	}
+
+	if len(lines) == 0 {
+		// Fallback to default line.
+		return []int{1}
+	}
+
+	uniqueLines := make([]int, 0, len(lines))
+	for line := range lines {
+		uniqueLines = append(uniqueLines, line)
+	}
+
+	slices.Sort(uniqueLines)
+	return uniqueLines
+}
+
 func threadFlows(h *handler, fs []*govulncheck.Finding) []ThreadFlow {
 	tfs := make([]ThreadFlow, 0, len(fs)) // must not be nil
 	for _, f := range fs {
@@ -375,7 +432,7 @@ func threadFlows(h *handler, fs []*govulncheck.Finding) []ThreadFlow {
 			}
 
 			tfl := ThreadFlowLocation{
-				Module:   frame.Module + "@" + frame.Version,
+				Module:   frame.Module + moduleVersionSeparator + frame.Version,
 				Location: Location{Message: Description{Text: symbol(frame)}}, // show the (full) symbol name
 			}
 			file, base := fileURIInfo(pos.Filename, top.Module, frame.Module, frame.Version)
@@ -398,6 +455,33 @@ func threadFlows(h *handler, fs []*govulncheck.Finding) []ThreadFlow {
 	return tfs
 }
 
+func gomodModuleLines(gomodPath string) (map[string]*modfile.Line, error) {
+	gomodContent, err := os.ReadFile(gomodPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading go.mod: %w", err)
+	}
+
+	parsedGomod, err := modfile.ParseLax(gomodPath, gomodContent, nil)
+	if err != nil {
+		return nil, fmt.Errorf("parsing go.mod %q: %w", gomodPath, err)
+	}
+
+	moduleLines := make(map[string]*modfile.Line, len(parsedGomod.Require)+1)
+
+	if parsedGomod.Go != nil && parsedGomod.Go.Syntax != nil {
+		moduleLines[internal.GoStdModulePath] = parsedGomod.Go.Syntax
+	}
+
+	for _, r := range parsedGomod.Require {
+		if r.Syntax != nil {
+			module := r.Mod.Path + moduleVersionSeparator + r.Mod.Version
+			moduleLines[module] = r.Syntax
+		}
+	}
+
+	return moduleLines, nil
+}
+
 func fileURIInfo(filename, top, module, version string) (string, string) {
 	if top == module {
 		return filename, SrcRootID
@@ -405,5 +489,5 @@ func fileURIInfo(filename, top, module, version string) (string, string) {
 	if module == internal.GoStdModulePath {
 		return filename, GoRootID
 	}
-	return filepath.ToSlash(filepath.Join(module+"@"+version, filename)), GoModCacheID
+	return filepath.ToSlash(filepath.Join(module+moduleVersionSeparator+version, filename)), GoModCacheID
 }

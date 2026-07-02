@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/telemetry/counter"
 	"golang.org/x/vuln/internal/client"
 	"golang.org/x/vuln/internal/govulncheck"
@@ -35,13 +36,22 @@ func RunGovulncheck(ctx context.Context, env []string, r io.Reader, stdout io.Wr
 		return fmt.Errorf("creating client: %w", err)
 	}
 
+	dir := filepath.FromSlash(cfg.dir)
+
 	prepareConfig(ctx, cfg, client)
 	var handler govulncheck.Handler
 	switch cfg.format {
 	case formatJSON:
 		handler = govulncheck.NewJSONHandler(stdout)
 	case formatSarif:
-		handler = sarif.NewHandler(stdout)
+		var moduleLines map[string]*modfile.Line
+		if cfg.ScanMode == govulncheck.ScanModeSource {
+			moduleLines, err = sarif.LoadGomod(dir)
+			if err != nil {
+				return fmt.Errorf("loading go.mod for SARIF handler: %w", err)
+			}
+		}
+		handler = sarif.NewHandler(stdout, moduleLines)
 	case formatOpenVEX:
 		handler = openvex.NewHandler(stdout)
 	default:
@@ -64,7 +74,6 @@ func RunGovulncheck(ctx context.Context, env []string, r io.Reader, stdout io.Wr
 
 	switch cfg.ScanMode {
 	case govulncheck.ScanModeSource:
-		dir := filepath.FromSlash(cfg.dir)
 		err = runSource(ctx, handler, cfg, client, dir)
 	case govulncheck.ScanModeBinary:
 		err = runBinary(ctx, handler, cfg, client)

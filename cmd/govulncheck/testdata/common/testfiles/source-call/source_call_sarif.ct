@@ -118,7 +118,7 @@ $ govulncheck -C ${moddir}/vuln -format sarif ./...
                   "uriBaseId": "%SRCROOT%"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 11
                 }
               },
               "message": {
@@ -141,7 +141,7 @@ $ govulncheck -C ${moddir}/vuln -format sarif ./...
                   "uriBaseId": "%SRCROOT%"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 8
                 }
               },
               "message": {
@@ -366,7 +366,7 @@ $ govulncheck -C ${moddir}/vuln -format sarif ./...
                   "uriBaseId": "%SRCROOT%"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 11
                 }
               },
               "message": {
@@ -389,7 +389,7 @@ $ govulncheck -C ${moddir}/vuln -format sarif ./...
                   "uriBaseId": "%SRCROOT%"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 8
                 }
               },
               "message": {
